@@ -2,7 +2,9 @@
 
 中文 | [English](README.en.md)
 
-纯前端的户型装修设计工具：在 2D 平面图上摆放家具、拆改墙体、测量尺寸，一键切换到 Three.js 3D 场景，可以鸟瞰，也可以第一人称漫游。整个应用就是一个 `index.html`，无需构建，打开即用。
+纯前端的户型装修设计工具：在 2D 平面图上摆放家具、拆改墙体、测量尺寸，一键切换到 Three.js 3D 场景，可以鸟瞰，也可以第一人称漫游。
+
+当前主工程为 **Vue 3 + Vite** 渐进式拆分版；原单文件备份为 [`legacy-index.html`](legacy-index.html)，仍可双击打开对照。
 
 ## 功能
 
@@ -28,21 +30,32 @@
 - 中文 / English 界面切换（顶栏右侧按钮，默认中文，选择会记住）
 - 导出 PNG 图片，导出 / 导入方案 JSON
 
-## 快速开始
+## 快速开始（Vue 版）
 
 ```bash
 git clone <仓库地址>
 cd <仓库目录>
+npm install
+npm run dev
 ```
 
-然后直接用浏览器打开 `index.html`。也可以起一个本地静态服务器：
+生产构建：
 
 ```bash
-python3 -m http.server 8000
-# 访问 http://localhost:8000
+npm run build
+npm run preview
 ```
 
-> Three.js 通过 jsDelivr CDN 加载，首次打开 3D 场景需要联网。
+### 无构建对照（Legacy）
+
+直接用浏览器打开 `legacy-index.html`，或：
+
+```bash
+python -m http.server 8000
+# 访问 http://localhost:8000/legacy-index.html
+```
+
+> Legacy 版 Three.js 通过 jsDelivr CDN 加载；Vue 版通过 npm 依赖 `three@0.160.0`，构建后可离线使用。
 
 ## 快捷键
 
@@ -63,22 +76,33 @@ python3 -m http.server 8000
 
 ## 技术栈
 
-- 原生 HTML / CSS / JavaScript，无框架、无构建步骤
-- 2D 平面图用 SVG 绘制
-- 3D 场景用 [Three.js](https://threejs.org/) r160（OrbitControls、PointerLockControls、RoundedBoxGeometry、RoomEnvironment、CSS2DRenderer）
-- 数据保存在 `localStorage`
+- Vue 3（Composition API）+ Vite
+- 2D 平面图用 SVG（`src/engine/plan2d.js`）
+- 3D 场景用 [Three.js](https://threejs.org/) r160（`src/engine/view3d.js`）
+- 方案数据保存在 `localStorage`（key：`huxing-design-v1`，与 Legacy 互通）
+
+主要目录：
+
+```
+src/
+  components/     # UI 壳（Header / 家具库 / 画布 / 面板）
+  data/           # 户型与家具库常量
+  engine/         # 2D / 3D 命令式引擎
+  store/          # 方案状态与撤销重做
+  i18n.js         # 简 / 繁 / EN
+legacy-index.html # 原单文件备份
+```
 
 ## 自定义户型
 
-户型数据写在 `index.html` 里：
+户型数据在 [`src/data/floorplan.js`](src/data/floorplan.js)：
 
 - `ROOMS`：房间多边形、名称、默认地面材料
 - `WALLS` / `WINS`：墙体与窗洞
 - `MATS`：地面材料名称与单价
 - `LIB`：家具库（类型、名称、默认尺寸、颜色）
-- `buildFurniture()`：各类家具的 3D 模型
 
-改这些数据就能换成自己的户型。
+3D 家具模型在 [`src/engine/furniture3d.js`](src/engine/furniture3d.js) 的 `buildFurniture()`。
 
 ## 社交媒体
 

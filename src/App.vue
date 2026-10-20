@@ -7,7 +7,6 @@ import SidePanel from './components/SidePanel.vue';
 import AppFooter from './components/AppFooter.vue';
 import Toast from './components/Toast.vue';
 
-const ready = ref(false);
 const error = ref('');
 
 onMounted(async () => {
@@ -15,7 +14,6 @@ onMounted(async () => {
     const { initPlan2D } = await import('./engine/plan2d.js');
     await import('./engine/view3d.js');
     initPlan2D();
-    ready.value = true;
   } catch (e) {
     console.error(e);
     error.value = e?.message || String(e);

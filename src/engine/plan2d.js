@@ -597,7 +597,7 @@ const TIPS = () => COARSE
      '3d':tr('3D 场景与平面方案实时同步 · 右侧面板修改会立即生效 · T 返回 2D', '3D stays in sync with the plan · panel edits apply instantly · T for 2D')};
 async function setView(m){
   if (m === viewMode || switching) return;
-  if (!bridge.View3D) return toast(tr('3D 引擎仍在加载或加载失败（需要联网加载 three.js）', '3D engine is still loading or failed to load (three.js needs a network connection)'));
+  if (!bridge.View3D) return toast(tr('3D 引擎仍在加载或加载失败', '3D engine is still loading or failed to load'));
   switching = true; document.body.classList.add('busy');
   viewMode = m;
   if (m === '3d'){ if (ui.tool !== 'select') setTool('select'); ui.mA = null; document.body.classList.add('m3d'); await bridge.View3D.enter(); }

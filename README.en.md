@@ -2,7 +2,9 @@
 
 [中文](README.md) | English
 
-A pure front-end tool for interior design on a floor plan: place furniture, remove or modify walls, and take measurements on a 2D plan, then switch to a Three.js 3D scene with one click — view it from above or walk through it in first person. The whole app is a single `index.html`: no build step, just open it.
+A pure front-end tool for interior design on a floor plan: place furniture, remove or modify walls, and take measurements on a 2D plan, then switch to a Three.js 3D scene with one click — view it from above or walk through it in first person.
+
+The main app is a progressive **Vue 3 + Vite** split. The original single-file build is kept as [`legacy-index.html`](legacy-index.html) for comparison.
 
 ## Features
 
@@ -28,21 +30,25 @@ A pure front-end tool for interior design on a floor plan: place furniture, remo
 - Chinese / English UI toggle (button on the right of the top bar; defaults to Chinese and remembers your choice)
 - Export to PNG, export / import plans as JSON
 
-## Quick Start
+## Quick Start (Vue)
 
 ```bash
 git clone <repository-url>
 cd <repository-directory>
+npm install
+npm run dev
 ```
 
-Then simply open `index.html` in your browser. Alternatively, start a local static server:
+Production build:
 
 ```bash
-python3 -m http.server 8000
-# Visit http://localhost:8000
+npm run build
+npm run preview
 ```
 
-> Three.js is loaded from the jsDelivr CDN, so an internet connection is required the first time you open the 3D scene.
+### Legacy (no build)
+
+Open `legacy-index.html` in a browser, or serve the folder statically. The Vue build uses npm `three@0.160.0`; the legacy file still loads Three.js from the jsDelivr CDN.
 
 ## Keyboard Shortcuts
 
@@ -63,22 +69,14 @@ python3 -m http.server 8000
 
 ## Tech Stack
 
-- Vanilla HTML / CSS / JavaScript — no framework, no build step
-- 2D floor plan rendered with SVG
-- 3D scene built with [Three.js](https://threejs.org/) r160 (OrbitControls, PointerLockControls, RoundedBoxGeometry, RoomEnvironment, CSS2DRenderer)
-- Data stored in `localStorage`
+- Vue 3 (Composition API) + Vite
+- 2D plan: SVG (`src/engine/plan2d.js`)
+- 3D: [Three.js](https://threejs.org/) r160 (`src/engine/view3d.js`)
+- Plans in `localStorage` (`huxing-design-v1`, shared with legacy)
 
 ## Customizing the Floor Plan
 
-The floor plan data lives in `index.html`:
-
-- `ROOMS`: room polygons, names, and default floor materials
-- `WALLS` / `WINS`: walls and window openings
-- `MATS`: floor material names and unit prices
-- `LIB`: furniture library (type, name, default size, color)
-- `buildFurniture()`: 3D models for each furniture type
-
-Edit this data to use your own floor plan.
+Floor plan data lives in [`src/data/floorplan.js`](src/data/floorplan.js) (`ROOMS`, `WALLS`, `WINS`, `MATS`, `LIB`). 3D furniture models are in `src/engine/furniture3d.js` (`buildFurniture`).
 
 ## Social Media
 
