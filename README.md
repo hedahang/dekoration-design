@@ -14,6 +14,8 @@
 - 拖动移动、旋转（Shift 自由角度）、调整尺寸，贴墙自动吸附
 - 测量工具（靠近墙面自动吸附，Shift 锁定水平 / 垂直）
 - 拆改非承重墙，承重墙单独标示
+- 简易画墙：轴对齐 120mm 隔墙，吸附墙角；「拆改」可删除自建墙
+- **自建户型（一期）**：户型菜单选「空白户型」→「外框」拖矩形 →「画墙」加隔墙，自动识别房间
 - 图层开关：尺寸标注、房间名、家具、网格、承重墙
 
 **3D 场景**
@@ -24,11 +26,12 @@
 - 在 3D 中也能选中、拖动家具，与 2D 方案实时同步
 
 **方案与统计**
+- 多户型模板切换（顶栏「户型」菜单）：各户型方案独立保存在本地
 - 房间面积与套内使用面积自动统计
 - 为每个房间更换地面材料（木地板、地砖、大理石、水磨石、地毯等），按面积加 5% 损耗估算造价
 - 撤销 / 重做，方案自动保存在浏览器本地
 - 中文 / English 界面切换（顶栏右侧按钮，默认中文，选择会记住）
-- 导出 PNG 图片，导出 / 导入方案 JSON
+- 导出 PNG 图片，导出 / 导入方案 JSON（含 `planId`，导入时可自动切到对应户型）
 
 ## 快速开始（Vue 版）
 
@@ -62,7 +65,7 @@ python -m http.server 8000
 | 按键 | 作用 |
 | --- | --- |
 | `T` | 切换 2D / 3D |
-| `V` / `M` / `X` | 选择 / 测量 / 拆改墙体 |
+| `V` / `M` / `B` / `W` / `X` | 选择 / 测量 / 外框 / 画墙 / 拆改墙体 |
 | `R` / `Shift+R` | 选中家具顺时针 / 逆时针旋转 90° |
 | `Delete` / `Backspace` | 删除选中家具 |
 | `Ctrl/⌘ + D` | 复制选中家具 |
@@ -79,29 +82,34 @@ python -m http.server 8000
 - Vue 3（Composition API）+ Vite
 - 2D 平面图用 SVG（`src/engine/plan2d.js`）
 - 3D 场景用 [Three.js](https://threejs.org/) r160（`src/engine/view3d.js`）
-- 方案数据保存在 `localStorage`（key：`huxing-design-v1`，与 Legacy 互通）
+- 方案数据保存在 `localStorage`：`huxing-design-v2:<planId>`（首次打开会把旧版 `huxing-design-v1` 迁到默认三居）
 
 主要目录：
 
 ```
 src/
   components/     # UI 壳（Header / 家具库 / 画布 / 面板）
-  data/           # 户型与家具库常量
+  data/
+    shared.js     # 材料 / 家具库等跨户型共享
+    plans/        # 各户型几何与默认布置（新增模板放这里）
+    floorplan.js  # 当前激活户型运行时 + 存档
   engine/         # 2D / 3D 命令式引擎
   store/          # 方案状态与撤销重做
   i18n.js         # 简 / 繁 / EN
 legacy-index.html # 原单文件备份
 ```
 
-## 自定义户型
+## 自定义 / 新增户型
 
-户型数据在 [`src/data/floorplan.js`](src/data/floorplan.js)：
+1. 在 [`src/data/plans/`](src/data/plans/) 新增模块（可参考 `three-bed.js`、`compact-2br.js`）
+2. 在 [`src/data/plans/index.js`](src/data/plans/index.js) 的 `PLANS` 列表中注册
+3. 户型字段要点：
+   - `walls` / `windows` / `doors` / `slides` / `rooms`：几何
+   - `center` / `bounds` / `walkStart`：2D 适应窗口与 3D 原点、漫游起点
+   - `dimChains` / `entryMark` / `lintels`：尺寸标注、入户箭头、额外过梁
+   - `furniture`：默认布置（`[type, name, cx, cy, w, d, rot?, color?]`）
 
-- `ROOMS`：房间多边形、名称、默认地面材料
-- `WALLS` / `WINS`：墙体与窗洞
-- `MATS`：地面材料名称与单价
-- `LIB`：家具库（类型、名称、默认尺寸、颜色）
-
+跨户型共享的地面材料与家具库在 [`src/data/shared.js`](src/data/shared.js)。  
 3D 家具模型在 [`src/engine/furniture3d.js`](src/engine/furniture3d.js) 的 `buildFurniture()`。
 
 ## 社交媒体

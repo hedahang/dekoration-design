@@ -39,4 +39,11 @@ export function applyStaticLang(){
 }
 
 
-export function setLANG(l){ LANG = l; }
+let _onLangChange = null;
+/** 由 store 注册：语言切换时通知 Vue 重绘 */
+export function onLangChange(fn) { _onLangChange = fn; }
+
+export function setLANG(l){
+  LANG = l;
+  _onLangChange?.();
+}

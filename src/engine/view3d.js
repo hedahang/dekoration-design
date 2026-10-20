@@ -6,14 +6,30 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { PointerLockControls } from 'three/addons/controls/PointerLockControls.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { CSS2DRenderer, CSS2DObject } from 'three/addons/renderers/CSS2DRenderer.js';
-import { WALLS, WINS, DOORS, SLIDES, ROOMS, MATS, COARSE, TAP } from '../data/floorplan.js';
+import {
+  WALLS, WINS, WIN_META, DOORS, SLIDES, LINTELS, ROOMS, MATS, COARSE, TAP,
+  CENTER, WALK_START, wallKey,
+} from '../data/floorplan.js';
 import { tr, nm } from '../i18n.js';
 import { state, ui, view, getF, snap, commit } from '../store/design.js';
-import { aabb } from '../utils/geometry.js';
+import { aabb, area, extraWallRects } from '../utils/geometry.js';
 import { bridge } from './bridge.js';
 import { buildFurniture, setMatApi } from './furniture3d.js';
 
 const $ = s => document.querySelector(s);
+const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+
+/** 建筑用小几何（家具工具在 furniture3d.js，此处自备以免循环依赖） */
+function box(w, h, d, m, x = 0, y = 0, z = 0) {
+  const matOr = typeof m === 'string' ? mat(m) : m;
+  const o = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), matOr);
+  o.castShadow = o.receiveShadow = true;
+  o.position.set(x, y + h / 2, z);
+  return o;
+}
+function metal() {
+  return mat('#cfd2d4', { metalness: 0.9, roughness: 0.25 });
+}
 
 // snapMove lives in plan2d; resolve via bridge when dragging in 3D
 function snapMove(f, x, y) {
@@ -29,7 +45,8 @@ function renderAll() { bridge.api?.renderAll?.(); }
  *  3D → 2D：反向——家具收起、墙体下沉、镜头回到正俯视并淡出到平面图。
  * ============================================================ */
 const stage = $('#stage'), host = $('#view3d');
-const OX = 6000, OY = 5300, H = 2.8, FOV = 45;       // 户型中心放在世界原点，层高 2.8 m
+let OX = CENTER.x, OY = CENTER.y;
+const H = 2.8, FOV = 45;       // 户型中心放在世界原点，层高 2.8 m
 const wx = x => (x - OX) / 1000, wz = y => (y - OY) / 1000, M = v => v / 1000;
 const SW = () => stage.clientWidth, SH = () => stage.clientHeight;
 const opt = {cut:2.8, furn:true, labels:true, night:false, hour:10, mode:'orbit'};
@@ -72,9 +89,9 @@ function init(){
   scene.add(hemi, sun, sun.target, ground);
 
   const pm = new THREE.PMREMGenerator(renderer); envTex = pm.fromScene(new RoomEnvironment(), .04).texture; pm.dispose();
-  setMatApi({ mat, rng });
   glassMat = new THREE.MeshPhysicalMaterial({color:0xcfe6ef, roughness:.05, transparent:true, opacity:.28, depthWrite:false, side:THREE.DoubleSide});
   wallMat = mat('#f4f1eb', {roughness:.92}); capMat = mat('#34312d', {roughness:.9}); frameMat = mat('#5d6166', {roughness:.5, metalness:.4});
+  setMatApi({ mat, rng, glassMat, frameMat });
 
   archFloor = new THREE.Group(); archUp = new THREE.Group(); furnG = new THREE.Group(); labelG = new THREE.Group(); lampG = new THREE.Group();
   scene.add(archFloor, archUp, furnG, labelG, lampG);
@@ -216,7 +233,7 @@ function buildArch(){
   clearGroup(archFloor); clearGroup(archUp); lampG.clear(); doors.length = 0; colliders = [];
   const top = opt.cut;
   ROOMS.forEach(r => {
-    const m = floorMat(state.rooms[r.id].mat), bay = r.counted === false;
+    const m = floorMat(state.rooms[r.id]?.mat || r.mat || 'tile800'), bay = r.counted === false;
     const geo = bay ? new THREE.ExtrudeGeometry(shapeOf(r.poly), {depth:.45, bevelEnabled:false}) : new THREE.ShapeGeometry(shapeOf(r.poly));
     geo.rotateX(-Math.PI/2);
     const fl = new THREE.Mesh(geo, bay ? [m, mat('#e9e4da')] : m);
@@ -233,15 +250,23 @@ function buildArch(){
   });
   [...DOORS, ...SLIDES].forEach(d => { const [x0, y0, x1, y1] = d.rect; const s = box(M(x1-x0), .012, M(y1-y0), mat('#d8d0c0', {roughness:.3}), wx((x0+x1)/2), 0, wz((y0+y1)/2)); s.castShadow = false; archFloor.add(s); });
   WALLS.forEach((w, i) => {
-    if (state.demolished.includes('w'+i)) return;
+    if (state.demolished.includes(wallKey(i))) return;
     wallBox(w, 0, w[4] === 'low' ? Math.min(1, top) : top);
     colliders.push([wx(w[0]), wz(w[1]), wx(w[2]), wz(w[3])]);
   });
-  // 门洞、飘窗洞口上方过梁
-  [...DOORS.map(d => [d.rect, 2.1]), ...SLIDES.map(s => [s.rect, s.v ? 2.4 : 2.1]), [[10270,800,10510,2600], 2.4], [[10270,4260,10510,5740], 2.4]]
-    .forEach(([r, h]) => { if (top > h) wallBox(r, h, top); });
+  extraWallRects().forEach(w => {
+    wallBox(w, 0, top);
+    colliders.push([wx(w[0]), wz(w[1]), wx(w[2]), wz(w[3])]);
+  });
+  // 门洞、飘窗等洞口上方过梁
+  [
+    ...DOORS.map(d => [d.rect, 2.1]),
+    ...SLIDES.map(s => [s.rect, s.v ? 2.4 : 2.1]),
+    ...LINTELS.map(l => [l.rect, l.head ?? 2.4]),
+  ].forEach(([r, h]) => { if (top > h) wallBox(r, h, top); });
   WINS.forEach((r, i) => {
-    const sill = i === 0 ? 1.4 : i >= 6 ? .45 : .9, head = 2.4;
+    const meta = WIN_META[i] || { sill: 0.9, head: 2.4 };
+    const sill = meta.sill, head = meta.head;
     wallBox(r, 0, Math.min(sill, top)); if (top > head) wallBox(r, head, top);
     colliders.push([wx(r[0]), wz(r[1]), wx(r[2]), wz(r[3])]);
     const gTop = Math.min(head, top); if (gTop <= sill) return;
@@ -277,7 +302,13 @@ function buildArch(){
 
 function buildFurn(){
   clearGroup(furnG);
-  state.furniture.forEach(f => furnG.add(buildFurniture(f)));
+  state.furniture.forEach(f => {
+    const g = buildFurniture(f);
+    g.position.set(wx(f.cx), 0, wz(f.cy));
+    g.rotation.y = -f.rot * Math.PI / 180;   // 平面顺时针旋转 → 绕 Y 轴负向
+    g.userData.fid = f.id;
+    furnG.add(g);
+  });
   furnG.visible = opt.furn; selKey = null; applyGrow();
 }
 
@@ -285,23 +316,16 @@ function buildLabels(){
   labelG.children.slice().forEach(o => { o.element.remove(); labelG.remove(o); });
   ROOMS.filter(r => r.at).forEach(r => {
     const el = document.createElement('div'); el.className = 'rlabel';
-    el.innerHTML = `${esc(nm(state.rooms[r.id].name))}<small>${area(r.poly).toFixed(1)}m²</small>`;
+    el.innerHTML = `${esc(nm(state.rooms[r.id]?.name || r.name))}<small>${area(r.poly).toFixed(1)}m²</small>`;
     const o = new CSS2DObject(el); o.position.set(wx(r.at[0]), opt.cut + .15, wz(r.at[1])); o.visible = labelG.visible; labelG.add(o);
   });
-  const counted = ROOMS.filter(r => r.counted !== false);
-  $('#roomList').innerHTML = counted.map(r => `<button data-room="${r.id}"><span>${esc(nm(state.rooms[r.id].name))}</span><small>${area(r.poly).toFixed(2)} m²</small></button>`).join('')
-    + `<button data-room="__all"><span>${tr('全屋', 'Whole home')}</span><small>${counted.reduce((a, r) => a + area(r.poly), 0).toFixed(2)} m²</small></button>`;
-  document.querySelectorAll('#roomList button').forEach(b => b.onclick = () => {
-    document.querySelectorAll('#roomList button').forEach(x => x.classList.toggle('on', x === b));
-    if (opt.mode === 'walk') setMode('orbit');
-    b.dataset.room === '__all' ? flyTo(isoWhole()) : flyToRoom(b.dataset.room);
-  });
+  // 房间列表由 FurnitureLibrary.vue 渲染
 }
 
 // 只重建变化的部分
 function sync(force){
   if (!inited || (!active && !force)) return;
-  const a = JSON.stringify([state.rooms, state.demolished, opt.cut]), f = JSON.stringify(state.furniture), l = JSON.stringify([state.rooms, opt.cut]);
+  const a = JSON.stringify([state.rooms, state.demolished, state.extraWalls, opt.cut]), f = JSON.stringify(state.furniture), l = JSON.stringify([state.rooms, opt.cut]);
   if (force || a !== sigArch){ sigArch = a; buildArch(); }
   if (force || f !== sigFurn){ sigFurn = f; buildFurn(); }
   if (force || l !== sigLabels){ sigLabels = l; buildLabels(); }
@@ -497,7 +521,8 @@ function setMode(m){
     bridge.select(null);
     if (opt.cut < H){ opt.cut = H; syncCutBtns(); sync(); }
     orbit.enabled = false; fly = null;
-    camera.position.set(wx(4200), 1.6, wz(8755)); camera.lookAt(wx(7000), 1.5, wz(8755));   // 入户门外
+    camera.position.set(wx(WALK_START.pos[0]), 1.6, wz(WALK_START.pos[1]));
+    camera.lookAt(wx(WALK_START.look[0]), 1.5, wz(WALK_START.look[1]));   // 入户门外
     $('#walkOverlay').style.display = 'flex';
     syncHint3d();
   } else {
@@ -593,5 +618,21 @@ function shot(){ const a = document.createElement('a'); a.download = tr('户型�
 
 function relang(){ syncWalkTexts(); if (inited) buildLabels(); }
 
-bridge.View3D = window.View3D = {enter, exit, relang, sync:() => sync(), shot, groundAt, flyToRoom:id => active && !anim && flyToRoom(id), walking:() => active && opt.mode === 'walk'};
+function onPlanChange(){
+  OX = CENTER.x;
+  OY = CENTER.y;
+  sigArch = sigFurn = sigLabels = '';
+  if (opt.mode === 'walk') setMode('orbit');
+  if (inited) sync(true);
+  if (active && !anim) flyTo(isoWhole());
+}
+
+bridge.View3D = window.View3D = {
+  enter, exit, relang, sync: () => sync(), shot, groundAt,
+  flyToRoom: id => active && !anim && flyToRoom(id),
+  flyToWhole: () => active && !anim && flyTo(isoWhole()),
+  setMode,
+  walking: () => active && opt.mode === 'walk',
+  onPlanChange,
+};
 

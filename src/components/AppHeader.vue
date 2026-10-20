@@ -4,7 +4,11 @@
       <button class="btn chip" id="tgLib" data-en="◧ Library">◧ 家具库</button>
       <button class="btn chip" id="tgPanel" data-en="Properties ◨">属性 ◨</button>
     </div>
-    <div class="brand"><b data-en="3BR 2LR 2BA · Interior Design">三室两厅两卫 · 装修设计</b><span id="subtitle">原始户型 1:60 · 尺寸单位 mm</span></div>
+    <details class="menu" id="planMenu">
+      <summary class="btn" id="planMenuBtn" data-en="Plan ▾">户型 ▾</summary>
+      <div class="menu-pop" id="planList"></div>
+    </details>
+    <div class="brand"><b id="planTitle">三室两厅两卫</b><span id="subtitle">原始户型 1:60 · 尺寸单位 mm</span></div>
     <div class="grp seg" id="viewSeg" title="切换 2D / 3D (T)" data-en-title="Switch 2D / 3D (T)">
       <span class="pill"></span>
       <button class="btn" data-view="2d" data-en="2D Plan">2D 平面</button>
@@ -13,7 +17,9 @@
     <div class="grp only2d" id="tools">
       <button class="btn on" data-tool="select" title="选择 / 移动 (V)" data-en-title="Select / Move (V)" data-en="Select">选择</button>
       <button class="btn" data-tool="measure" title="测量 (M)" data-en-title="Measure (M)" data-en="Measure">测量</button>
-      <button class="btn" data-tool="demolish" title="拆改非承重墙 (X)" data-en-title="Demolish non-bearing walls (X)" data-en="Demolish">拆改墙体</button>
+      <button class="btn" data-tool="frame" data-editable-only hidden title="外框 (B) · 拖出矩形外墙" data-en-title="Outer frame (B) · drag a rectangle" data-en="Frame">外框</button>
+      <button class="btn" data-tool="wall" title="画墙 (W) · 轴对齐隔墙 120mm" data-en-title="Draw wall (W) · axis-aligned 120mm partition" data-en="Wall">画墙</button>
+      <button class="btn" data-tool="demolish" title="拆改非承重墙 / 删除自建墙 (X)" data-en-title="Demolish non-bearing walls / delete custom walls (X)" data-en="Demolish">拆改墙体</button>
     </div>
     <div class="grp only2d">
       <button class="btn" id="zoomOut" title="缩小" data-en-title="Zoom out">−</button>

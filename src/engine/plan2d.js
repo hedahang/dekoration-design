@@ -2,17 +2,25 @@
  * 2D 平面引擎 —— 由 Vue onMounted 调用 initPlan2D()
  */
 import {
-  WALLS, WINS, DOORS, SLIDES, ROOMS, MATS, LIB,
-  uid, F, defaultState, fixState,
+  WALLS, WALL_IDS, WINS, DOORS, SLIDES, ROOMS, MATS,
+  uid, F, defaultState, fixState, load,
   PX_MM, COARSE, TAP, narrow, BOUNDS,
+  wallKey, wallById, ENTRY_MARK, DIM_CHAINS, PLAN_META,
+  listPlans, switchPlanId, getActivePlanId, hasPlan,
+  isEditablePlan, snapshotGeometry, rebuildEditableGeometry,
 } from '../data/floorplan.js';
 import { LANG, LANG_KEY, tr, nm, applyStaticLang, setLANG } from '../i18n.js';
 import {
   state, ui, view, undoStack, redoStack,
   save, snap, commit, mutate, undo, redo, getF, validateSel,
-  setStoreHooks, replaceState,
+  setStoreHooks, setSelectHook, replaceState, bootstrapState,
+  select, toast, bumpRevision,
 } from '../store/design.js';
-import { area, perim, bbox, aabb, fmt, norm, snapRects } from '../utils/geometry.js';
+import {
+  area, perim, bbox, aabb, fmt, norm, snapRects,
+  segmentToWallRect, wallLengthMm, WALL_THICK,
+} from '../utils/geometry.js';
+import { outerFrameWalls, FRAME_MIN, FRAME_THICK } from '../utils/roomsFromWalls.js';
 import { shade } from '../utils/color.js';
 import { furnSVG } from './furnitureSvg.js';
 import { bridge } from './bridge.js';
@@ -49,9 +57,15 @@ function buildDefs(){
 const NOLABEL = ['plant','floorlamp','sidetable','barstool','beanbag'];
 function renderRooms(){
   let s = '';
-  ROOMS.forEach(r => s += `<polygon class="room" data-room="${r.id}" points="${r.poly.map(p=>p.join(',')).join(' ')}" fill="url(#m-${state.rooms[r.id].mat})"/>`);
+  ROOMS.forEach(r => {
+    const mat = state.rooms[r.id]?.mat || r.mat || 'tile800';
+    s += `<polygon class="room" data-room="${r.id}" points="${r.poly.map(p=>p.join(',')).join(' ')}" fill="url(#m-${mat})"/>`;
+  });
   const sill = ([a,b,c,d]) => `<rect x="${a}" y="${b}" width="${c-a}" height="${d-b}" fill="#e2dacb" stroke="#b9b0a0" stroke-width="1" vector-effect="non-scaling-stroke" pointer-events="none"/>`;
   DOORS.forEach(d => s += sill(d.rect)); SLIDES.forEach(d => s += sill(d.rect));
+  if (!ROOMS.length && isEditablePlan()) {
+    s += `<text x="${BOUNDS.x + BOUNDS.w / 2}" y="${BOUNDS.y + BOUNDS.h / 2}" font-size="280" text-anchor="middle" fill="#b0a698">${tr('用「外框」拖出矩形开始自建', 'Use Frame tool to start')}</text>`;
+  }
   $('#gRooms').innerHTML = s;
 }
 
@@ -66,14 +80,44 @@ function renderFurn(){
   }).join('');
 }
 
+function wallFill(k, dem){
+  if (dem) return { fill: 'rgba(198,91,58,.12)', ex: 'stroke="#c65b3a" stroke-width="1.2" stroke-dasharray="5 3" vector-effect="non-scaling-stroke"' };
+  if (k === 'b') return { fill: ui.layers.bearing ? '#b8412c' : '#26241f', ex: '' };
+  if (k === 'low') return { fill: '#e9e3d8', ex: 'stroke="#8f897d" stroke-width="1" vector-effect="non-scaling-stroke"' };
+  if (k === 'e') return { fill: '#8f897d', ex: '' };
+  if (k === 'extra') return { fill: '#7d8f7a', ex: 'stroke="#5f6f5c" stroke-width="1" vector-effect="non-scaling-stroke"' };
+  return { fill: '#a7a195', ex: '' };
+}
+
 function renderWalls(){
-  $('#gWalls').innerHTML = WALLS.map((w,i) => {
-    const [x0,y0,x1,y1,k] = w, id = 'w'+i, dem = state.demolished.includes(id);
-    let fill = k==='b' ? (ui.layers.bearing ? '#b8412c' : '#26241f') : k==='low' ? '#e9e3d8' : k==='e' ? '#8f897d' : '#a7a195';
-    let ex = k==='low' ? 'stroke="#8f897d" stroke-width="1" vector-effect="non-scaling-stroke"' : '';
-    if (dem){ fill = 'rgba(198,91,58,.12)'; ex = 'stroke="#c65b3a" stroke-width="1.2" stroke-dasharray="5 3" vector-effect="non-scaling-stroke"'; }
-    return `<rect class="wall" data-wall="${id}" x="${x0}" y="${y0}" width="${x1-x0}" height="${y1-y0}" fill="${fill}" ${ex}/>`;
-  }).join('');
+  const editable = isEditablePlan();
+  const plan = WALLS.map((w, i) => {
+    const [x0, y0, x1, y1, k] = w, id = wallKey(i), dem = state.demolished.includes(id);
+    const kind = editable && k === 'n' ? 'extra' : k;
+    const { fill, ex } = wallFill(kind, dem);
+    const cls = editable && k === 'n' ? 'wall extra' : 'wall';
+    return `<rect class="${cls}" data-wall="${id}" x="${x0}" y="${y0}" width="${x1 - x0}" height="${y1 - y0}" fill="${fill}" ${ex}/>`;
+  });
+  const custom = editable ? [] : (state.extraWalls || []).map(w => {
+    const { fill, ex } = wallFill('extra', false);
+    return `<rect class="wall extra" data-wall="${w.id}" data-extra="1" x="${w.x0}" y="${w.y0}" width="${w.x1 - w.x0}" height="${w.y1 - w.y0}" fill="${fill}" ${ex}/>`;
+  });
+  let preview = '';
+  if (ui.tool === 'wall' && ui.mA && ui.mCur) {
+    const r = segmentToWallRect(ui.mA, ui.mCur, WALL_THICK);
+    if (r) {
+      preview = `<rect class="wall-preview" x="${r.x0}" y="${r.y0}" width="${r.x1 - r.x0}" height="${r.y1 - r.y0}"
+        fill="rgba(47,93,98,.35)" stroke="#2f5d62" stroke-width="1.5" stroke-dasharray="8 4" vector-effect="non-scaling-stroke" pointer-events="none"/>`;
+    }
+  }
+  if (ui.tool === 'frame' && ui.mA && ui.mCur) {
+    const L = Math.min(ui.mA.x, ui.mCur.x), R = Math.max(ui.mA.x, ui.mCur.x);
+    const T = Math.min(ui.mA.y, ui.mCur.y), B = Math.max(ui.mA.y, ui.mCur.y);
+    const ok = (R - L) >= FRAME_MIN && (B - T) >= FRAME_MIN;
+    preview = `<rect class="wall-preview" x="${L}" y="${T}" width="${R - L}" height="${B - T}"
+      fill="none" stroke="${ok ? '#2f5d62' : '#b3372a'}" stroke-width="2" stroke-dasharray="10 5" vector-effect="non-scaling-stroke" pointer-events="none"/>`;
+  }
+  $('#gWalls').innerHTML = plan.join('') + custom.join('') + preview;
 }
 
 function renderOpenings(){
@@ -98,9 +142,10 @@ function renderOpenings(){
     if (v){ const L = y1-y0, m = (x0+x1)/2; s += `<rect x="${m-45}" y="${y0}" width="40" height="${L*.55}" fill="#fff" ${DS}/><rect x="${m+5}" y="${y1-L*.55}" width="40" height="${L*.55}" fill="#fff" ${DS}/>`; }
     else { const L = x1-x0, m = (y0+y1)/2; s += `<rect x="${x0}" y="${m-45}" width="${L*.55}" height="40" fill="#fff" ${DS}/><rect x="${x1-L*.55}" y="${m+5}" width="${L*.55}" height="40" fill="#fff" ${DS}/>`; }
   });
-  // 入户标识
-  s += `<path d="M3350 8755H4350M4150 8600L4400 8755L4150 8910" fill="none" stroke="#b5653a" stroke-width="2" vector-effect="non-scaling-stroke"/>
-        <text x="3380" y="8600" font-size="200" fill="#b5653a">${tr('入户','Entry')}</text>`;
+  if (ENTRY_MARK){
+    s += `<path d="${ENTRY_MARK.path}" fill="none" stroke="#b5653a" stroke-width="2" vector-effect="non-scaling-stroke"/>
+          <text x="${ENTRY_MARK.text[0]}" y="${ENTRY_MARK.text[1]}" font-size="200" fill="#b5653a">${tr('入户','Entry')}</text>`;
+  }
   $('#gOpen').innerHTML = s;
 }
 
@@ -109,7 +154,7 @@ function renderLabels(){
   g.setAttribute('display', ui.layers.labels ? 'inline' : 'none');
   g.innerHTML = ROOMS.filter(r => r.at).map(r => {
     const [x,y] = r.at, halo = 'stroke="#fbf9f4" stroke-width="45" paint-order="stroke" stroke-linejoin="round"';
-    return `<text x="${x}" y="${y}" font-size="250" font-weight="600" text-anchor="middle" fill="#2b2824" ${halo}>${esc(nm(state.rooms[r.id].name))}</text>
+    return `<text x="${x}" y="${y}" font-size="250" font-weight="600" text-anchor="middle" fill="#2b2824" ${halo}>${esc(nm(state.rooms[r.id]?.name || r.name))}</text>
       <text x="${x}" y="${y+260}" font-size="175" text-anchor="middle" fill="#7d7366" ${halo}>${fmt(area(r.poly))} m²</text>`;
   }).join('');
 }
@@ -127,11 +172,7 @@ function renderDims(){
     return s;
   };
   const g = $('#gDims');
-  g.innerHTML =
-    chain(true,-750,0,[1580,240,2760,240,1540,240,3670]) + chain(true,-1250,0,[10270]) +
-    chain(true,11350,0,[2180,240,2160,240,5450,240,1340]) + chain(true,11850,0,[11850]) +
-    chain(false,-800,0,[3370,1580,240,2770,240,2360]) + chain(false,-1300,0,[10560]) +
-    chain(false,12750,0,[3370,240,2760,240,3950]) + chain(false,13250,0,[10560]);
+  g.innerHTML = (DIM_CHAINS || []).map(c => chain(c.horiz, c.at, c.start, c.segs)).join('');
   g.setAttribute('display', ui.layers.dims ? 'inline' : 'none');
 }
 
@@ -184,107 +225,79 @@ function renderSel(){
 }
 
 function renderAll(){
-  renderGrid(); renderRooms(); renderFurn(); renderWalls(); renderLabels(); renderMeasure(); renderSel(); renderPanel(); updateHeader();
+  renderGrid(); renderRooms(); renderFurn(); renderWalls(); renderLabels(); renderMeasure(); renderSel(); updateHeader();
+  bumpRevision();
   bridge.View3D?.sync();
+}
+
+function syncBrand(){
+  const title = $('#planTitle');
+  if (title) title.textContent = LANG === 'en' ? PLAN_META.nameEn : PLAN_META.name;
+  const btn = $('#planMenuBtn');
+  if (btn) btn.textContent = (LANG === 'en' ? 'Plan ▾' : '户型 ▾');
+  document.querySelectorAll('#planList [data-plan]').forEach(b => {
+    b.classList.toggle('on', b.dataset.plan === getActivePlanId());
+  });
+  syncEditableUi();
 }
 
 function updateHeader(){
   const tot = ROOMS.filter(r => r.counted !== false).reduce((a,r) => a + area(r.poly), 0);
-  $('#subtitle').textContent = tr(`套内使用面积约 ${fmt(tot)} m² · 尺寸单位 mm · 原图比例 1:60`, `Net floor area ≈ ${fmt(tot)} m² · Units: mm · Original scale 1:60`);
+  const sub = LANG === 'en' ? PLAN_META.subtitleEn : PLAN_META.subtitle;
+  $('#subtitle').textContent = tr(`套内约 ${fmt(tot)} m² · ${sub}`, `Net ≈ ${fmt(tot)} m² · ${sub}`);
   $('#undo').disabled = !undoStack.length; $('#redo').disabled = !redoStack.length;
   $('#undo').style.opacity = undoStack.length ? 1 : .4; $('#redo').style.opacity = redoStack.length ? 1 : .4;
+  syncBrand();
 }
 
-/* ======================= 右侧面板 ======================= */
+function afterPlanChange(){
+  syncEditableUi();
+  renderOpenings();
+  renderDims();
+  fitView();
+  renderAll();
+  bridge.View3D?.onPlanChange?.();
+  const tip = isEditablePlan() && !WALLS.length
+    ? tr('已进入空白户型 · 用「外框」拖出矩形开始', 'Blank plan · use Frame to draw the outer shell')
+    : tr(`已切换到「${PLAN_META.name}」`, `Switched to "${PLAN_META.nameEn}"`);
+  toast(tip);
+}
+
+function changePlan(planId){
+  if (planId === getActivePlanId()) return;
+  if (!confirm(tr(
+    '切换户型将保存当前方案，并打开目标户型的布置（各户型独立保存）。继续？',
+    'Switching plans saves the current layout and opens the other plan (each plan is stored separately). Continue?'
+  ))) return;
+  save();
+  if (!switchPlanId(planId)) return;
+  bootstrapState(load() || defaultState());
+  afterPlanChange();
+}
+
+function buildPlanMenu(){
+  const list = $('#planList');
+  if (!list) return;
+  list.innerHTML = listPlans().map(p =>
+    `<button class="btn ${p.id === getActivePlanId() ? 'on' : ''}" data-plan="${p.id}">${LANG === 'en' ? p.nameEn : p.name}</button>`
+  ).join('');
+  list.onclick = e => {
+    const id = e.target.closest('[data-plan]')?.dataset.plan;
+    if (!id) return;
+    const menu = $('#planMenu'); if (menu) menu.open = false;
+    changePlan(id);
+  };
+}
+
+/* ======================= 右侧面板 / FAB / Toast 已迁至 Vue ======================= */
 const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
-
-function renderPanel(){
-  renderFab();
-  const p = $('#panel');
-  if (ui.sel?.kind === 'furn'){ const f = getF(ui.sel.id); if (f){ p.innerHTML = furnPanel(f); bindFurnPanel(f); return; } }
-  if (ui.sel?.kind === 'room'){ p.innerHTML = roomPanel(ROOMS.find(r => r.id === ui.sel.id)); bindRoomPanel(); return; }
-  p.innerHTML = overviewPanel(); bindOverview();
-}
-
-function overviewPanel(){
-  const rows = ROOMS.map(r => {
-    const st = state.rooms[r.id];
-    return `<tr class="click" data-room="${r.id}"><td><span class="sw" style="background:${MATS[st.mat].sw}"></span>${esc(nm(st.name))}${r.counted===false?' <span class="muted">*</span>':''}</td>
-      <td class="r">${fmt(area(r.poly))} m²</td></tr>`;
-  }).join('');
-  const tot = ROOMS.filter(r => r.counted !== false).reduce((a,r) => a + area(r.poly), 0);
-  const byMat = {};
-  ROOMS.forEach(r => { const m = state.rooms[r.id].mat; byMat[m] = (byMat[m]||0) + area(r.poly); });
-  let cost = 0;
-  const matRows = Object.entries(byMat).map(([m,a]) => { const c = a*MATS[m].price*1.05; cost += c;
-    return `<tr><td><span class="sw" style="background:${MATS[m].sw}"></span>${nm(MATS[m].name)}</td><td class="r">${fmt(a,1)} m²</td><td class="r">¥${Math.round(c).toLocaleString()}</td></tr>`; }).join('');
-  const dem = state.demolished.map(id => WALLS[+id.slice(1)]);
-  const demLen = dem.reduce((a,w) => a + Math.max(w[2]-w[0], w[3]-w[1]), 0) / 1000;
-  return `
-  <section><h3>${tr('房间面积','Room Areas')} <small>${tr('点击查看 / 更换地面','Click to view / change flooring')}</small></h3>
-    <table>${rows}</table>
-    <div class="total"><span>${tr('套内使用面积','Net floor area')}</span><b>${fmt(tot)} m²</b></div>
-    <div class="muted" style="font-size:11px;margin-top:4px">${tr('* 飘窗不计入使用面积；面积按墙体内净尺寸计算','* Bay windows are excluded; areas use net inner wall dimensions')}</div></section>
-  <section><h3>${tr('地面材料估算','Flooring Estimate')} <small>${tr('含 5% 损耗','incl. 5% waste')}</small></h3>
-    <table>${matRows}</table>
-    <div class="total"><span>${tr('地面材料合计','Flooring total')}</span><b>¥${Math.round(cost).toLocaleString()}</b></div></section>
-  <section><h3>${tr('方案统计','Plan Stats')}</h3>
-    <div class="stats"><div><small>${tr('家具数量','Furniture')}</small><span class="big">${state.furniture.length}</span></div>
-      <div><small>${tr('拆除墙体','Walls removed')}</small><span class="big">${fmt(demLen,1)}</span> m</div></div>
-    <div class="actions"><button class="btn" id="clearMeasure">${tr('清除测量','Clear measures')} (${state.measures.length})</button>
-      <button class="btn danger" id="clearFurn">${tr('清空布置','Clear layout')}</button></div></section>
-  ${COARSE ? tr(`<section><h3>触屏操作</h3><div class="kbd">
-    <kbd>单指拖动</kbd><span>空白处平移画面</span><kbd>双指</kbd><span>捏合缩放、拖动平移</span>
-    <kbd>家具库</kbd><span>点一下放到画面中央，或按住向右拖到指定位置</span>
-    <kbd>点家具</kbd><span>选中后拖动移动；拖顶部圆点旋转、右下方块改尺寸</span>
-    <kbd>工具条</kbd><span>选中后底部可旋转 / 复制 / 删除</span>
-    <kbd>测量</kbd><span>按住拖出一条线，或依次点两点</span>
-    <kbd>3D 漫游</kbd><span>左下摇杆移动，拖动屏幕转向，点门开关</span>
-  </div></section>`, `<section><h3>Touch Controls</h3><div class="kbd">
-    <kbd>1-finger drag</kbd><span>Pan on empty space</span><kbd>2 fingers</kbd><span>Pinch to zoom, drag to pan</span>
-    <kbd>Library</kbd><span>Tap to place at center, or hold and drag right to a spot</span>
-    <kbd>Tap item</kbd><span>Drag to move; top dot rotates, bottom-right square resizes</span>
-    <kbd>Toolbar</kbd><span>Bottom bar can rotate / duplicate / delete</span>
-    <kbd>Measure</kbd><span>Hold and drag a line, or tap two points</span>
-    <kbd>3D walk</kbd><span>Joystick moves, drag to look, tap doors to open</span>
-  </div></section>`) : ''}
-  ${tr(`<section><h3>键盘快捷键</h3><div class="kbd">
-    <kbd>拖拽</kbd><span>左侧家具拖入平面图</span><kbd>V</kbd><span>选择 / 移动</span><kbd>M</kbd><span>测量（Shift 水平/垂直）</span>
-    <kbd>X</kbd><span>拆改非承重墙（黑色为承重墙）</span><kbd>R</kbd><span>旋转 90°（Shift 反向）</span><kbd>方向键</kbd><span>微调 10mm（Shift 100mm）</span>
-    <kbd>⌘/Ctrl D</kbd><span>复制</span><kbd>Delete</kbd><span>删除</span><kbd>⌘/Ctrl Z</kbd><span>撤销</span><kbd>T</kbd><span>切换 2D / 3D</span><kbd>F</kbd><span>适应窗口</span><kbd>Esc</kbd><span>取消选择</span>
-  </div></section>`, `<section><h3>Keyboard Shortcuts</h3><div class="kbd">
-    <kbd>Drag</kbd><span>Drag furniture onto the plan</span><kbd>V</kbd><span>Select / move</span><kbd>M</kbd><span>Measure (Shift: horizontal/vertical)</span>
-    <kbd>X</kbd><span>Demolish non-bearing walls (black = bearing)</span><kbd>R</kbd><span>Rotate 90° (Shift reverses)</span><kbd>Arrows</kbd><span>Nudge 10mm (Shift 100mm)</span>
-    <kbd>⌘/Ctrl D</kbd><span>Duplicate</span><kbd>Delete</kbd><span>Delete</span><kbd>⌘/Ctrl Z</kbd><span>Undo</span><kbd>T</kbd><span>Toggle 2D / 3D</span><kbd>F</kbd><span>Fit to window</span><kbd>Esc</kbd><span>Deselect</span>
-  </div></section>`)}`;
-}
-function bindOverview(){
-  document.querySelectorAll('#panel tr[data-room]').forEach(tr => tr.onclick = () => { select({kind:'room', id:tr.dataset.room}); if (is3D()) bridge.View3D.flyToRoom(tr.dataset.room); });
-  $('#clearMeasure').onclick = () => state.measures.length && mutate(() => state.measures = []);
-  $('#clearFurn').onclick = clearLayout;
-}
-
-// 底部浮动工具条：触屏没有键盘，旋转 / 复制 / 删除都放在这里
-function renderFab(){
-  const fab = $('#fab'), f = ui.sel?.kind === 'furn' && getF(ui.sel.id), r = ui.sel?.kind === 'room' && ROOMS.find(r => r.id === ui.sel.id);
-  if (!f && !r){ fab.classList.remove('show'); return; }
-  fab.innerHTML = f
-    ? `<span class="name">${esc(nm(f.name))}</span><button class="btn" data-a="rotL">↺</button><button class="btn" data-a="rotR">↻ ${tr('旋转','Rotate')}</button>
-       <button class="btn" data-a="dup">${tr('复制','Duplicate')}</button><button class="btn danger" data-a="del">${tr('删除','Delete')}</button><span class="sep"></span>
-       <button class="btn narrow-only" data-a="prop">${tr('属性','Properties')}</button><button class="btn" data-a="done">${tr('完成','Done')}</button>`
-    : `<span class="name">${esc(nm(state.rooms[r.id].name))}</span><button class="btn narrow-only" data-a="prop">${tr('地面 / 属性','Floor / Properties')}</button><button class="btn" data-a="done">${tr('完成','Done')}</button>`;
-  fab.classList.add('show');
-  fab.querySelectorAll('[data-a]').forEach(b => b.onclick = () => ({
-    rotL:() => rotateSel(-90), rotR:() => rotateSel(90), dup:duplicateSel, del:deleteSel,
-    prop:() => drawer('panel', true), done:() => { select(null); closeDrawers(); },
-  })[b.dataset.a]());
-}
 
 function clearLayout(){
   const n = state.furniture.length;
   if (!n) return toast(tr('当前没有布置任何家具', 'There is no furniture to clear'));
   if (!confirm(tr(`确定清空全部 ${n} 件家具 / 家电吗？\n墙体、地面材料和测量线会保留，可点「撤销」恢复。`, `Remove all ${n} furniture / appliance items?\nWalls, flooring and measurements are kept. You can Undo this.`))) return;
-  ui.sel = null; mutate(() => state.furniture = []);
+  select(null);
+  mutate(() => { state.furniture = []; });
   toast(tr('已清空布置，可点「撤销」恢复', 'Layout cleared — Undo to restore'));
 }
 
@@ -313,78 +326,18 @@ function syncPaneBtns(){
   $('#tgLib').classList.toggle('on', vis('lib')); $('#tgPanel').classList.toggle('on', vis('panel'));
   $('#tgLib').title = vis('lib') ? tr('收起家具库 ( [ )', 'Hide library ( [ )') : tr('展开家具库 ( [ )', 'Show library ( [ )');
   $('#tgPanel').title = vis('panel') ? tr('收起属性面板 ( ] )', 'Hide properties ( ] )') : tr('展开属性面板 ( ] )', 'Show properties ( ] )');
-  $('#stage').classList.toggle('drawer-panel', n && vis('panel'));   // 属性抽屉盖住画面时让出底部工具条
+  $('#stage').classList.toggle('drawer-panel', n && vis('panel'));
 }
 function closeDrawers(){ if (narrow()) drawer(null); }
 
-function roomPanel(r){
-  const st = state.rooms[r.id], a = area(r.poly), [x0,y0,x1,y1] = bbox(r.poly), inside = state.furniture.filter(f => f.cx>x0&&f.cx<x1&&f.cy>y0&&f.cy<y1);
-  const mats = Object.entries(MATS).map(([k,m]) => `<button class="mat ${k===st.mat?'on':''}" data-mat="${k}"><i style="background:${m.sw}"></i><span>${nm(m.name)}<small>¥${m.price}/m²</small></span></button>`).join('');
-  return `<section><h3>${tr('房间','Room')}</h3>
-    <div class="form"><label class="full">${tr('名称','Name')}<input id="rName" value="${esc(nm(st.name))}"></label></div>
-    <div class="stats" style="margin-top:10px">
-      <div><small>${tr('使用面积','Floor area')}</small><span class="big">${fmt(a)}</span> m²</div>
-      <div><small>${tr('周长','Perimeter')}</small><span class="big">${fmt(perim(r.poly),1)}</span> m</div>
-      <div><small>${tr('开间','Width')}</small><span class="big">${x1-x0}</span> mm</div>
-      <div><small>${tr('进深','Depth')}</small><span class="big">${y1-y0}</span> mm</div></div>
-    <div class="muted">${tr(`墙面面积（层高 2.8m，未扣门窗）约 ${fmt(perim(r.poly)*2.8,1)} m²`, `Wall area (2.8m ceiling, openings not deducted) ≈ ${fmt(perim(r.poly)*2.8,1)} m²`)}</div></section>
-  <section><h3>${tr('地面材料','Flooring')}</h3><div class="mats">${mats}</div>
-    <div class="total"><span>${tr('材料估价','Estimated cost')}</span><b>¥${Math.round(a*MATS[st.mat].price*1.05).toLocaleString()}</b></div></section>
-  <section><h3>${tr('房间内家具','Furniture in room')} <small>${tr(`${inside.length} 件`, `${inside.length} items`)}</small></h3>
-    <table>${inside.map(f => `<tr class="click" data-fid="${f.id}"><td>${esc(nm(f.name))}</td><td class="r muted">${f.w}×${f.d}</td></tr>`).join('') || `<tr><td class="muted">${tr('暂无','None')}</td></tr>`}</table>
-    <div class="actions"><button class="btn" id="back">${tr('← 返回总览','← Back to overview')}</button></div></section>`;
-}
-function bindRoomPanel(){
-  const id = ui.sel.id;
-  $('#rName').onchange = e => mutate(() => state.rooms[id].name = e.target.value.trim() || state.rooms[id].name);
-  document.querySelectorAll('#panel [data-mat]').forEach(b => b.onclick = () => mutate(() => state.rooms[id].mat = b.dataset.mat));
-  document.querySelectorAll('#panel tr[data-fid]').forEach(tr => tr.onclick = () => select({kind:'furn', id:tr.dataset.fid}));
-  $('#back').onclick = () => select(null);
-}
-
-function furnPanel(f){
-  return `<section><h3>${tr('家具属性','Furniture')}</h3>
-    <div class="form">
-      <label class="full">${tr('名称','Name')}<input id="fName" value="${esc(nm(f.name))}"></label>
-      <label>${tr('宽','Width')} (mm)<input type="number" id="fW" value="${f.w}" min="50" step="10"></label>
-      <label>${tr('深','Depth')} (mm)<input type="number" id="fD" value="${f.d}" min="50" step="10"></label>
-      <label>${tr('中心','Center')} X (mm)<input type="number" id="fX" value="${Math.round(f.cx)}" step="10"></label>
-      <label>${tr('中心','Center')} Y (mm)<input type="number" id="fY" value="${Math.round(f.cy)}" step="10"></label>
-      <label>${tr('旋转','Rotation')} (°)<input type="number" id="fR" value="${f.rot}" step="15"></label>
-      <label>${tr('颜色','Color')}<input type="color" id="fC" value="${f.color}"></label>
-    </div>
-    <div class="muted" style="margin-top:8px">${tr('占地面积','Footprint')} ${fmt(f.w*f.d/1e6)} m²</div>
-    <div class="actions">
-      <button class="btn" id="aRot">${tr('旋转 90°','Rotate 90°')}</button><button class="btn" id="aDup">${tr('复制','Duplicate')}</button>
-      <button class="btn" id="aTop">${tr('置于顶层','Bring to front')}</button><button class="btn" id="aBot">${tr('置于底层','Send to back')}</button>
-      <button class="btn danger" id="aDel">${tr('删除','Delete')}</button><button class="btn" id="back">${tr('← 返回','← Back')}</button>
-    </div></section>
-  <section class="muted" style="font-size:12px">${tr('拖动家具移动；拖动上方圆点旋转；拖动右下角方块调整尺寸。开启「贴墙吸附」后靠近墙面会自动贴齐。', 'Drag to move; drag the top dot to rotate; drag the bottom-right square to resize. With "Wall snap" on, items snap flush to nearby walls.')}</section>`;
-}
-function bindFurnPanel(f){
-  const upd = (fn) => mutate(() => { const g = getF(f.id); if (g) fn(g); });
-  const num = (id, fn) => $(id).onchange = e => { const v = parseFloat(e.target.value); if (!isNaN(v)) upd(g => fn(g, v)); };
-  $('#fName').onchange = e => upd(g => g.name = e.target.value.trim() || g.name);
-  num('#fW', (g,v) => g.w = Math.max(50, Math.round(v)));
-  num('#fD', (g,v) => g.d = Math.max(50, Math.round(v)));
-  num('#fX', (g,v) => g.cx = v); num('#fY', (g,v) => g.cy = v); num('#fR', (g,v) => g.rot = norm(v));
-  $('#fC').onchange = e => upd(g => g.color = e.target.value);
-  $('#aRot').onclick = () => rotateSel(90);
-  $('#aDup').onclick = duplicateSel;
-  $('#aDel').onclick = deleteSel;
-  $('#aTop').onclick = () => mutate(() => { const i = state.furniture.findIndex(g => g.id===f.id); state.furniture.push(...state.furniture.splice(i,1)); });
-  $('#aBot').onclick = () => mutate(() => { const i = state.furniture.findIndex(g => g.id===f.id); state.furniture.unshift(...state.furniture.splice(i,1)); });
-  $('#back').onclick = () => select(null);
-}
-
 /* ======================= 操作 ======================= */
-function select(sel){ ui.sel = sel; renderSel(); renderPanel(); }
 function rotateSel(d){ if (ui.sel?.kind==='furn') mutate(() => { const f = getF(ui.sel.id); f.rot = norm(f.rot + d); }); }
-function deleteSel(){ if (ui.sel?.kind==='furn'){ const id = ui.sel.id; ui.sel = null; mutate(() => state.furniture = state.furniture.filter(f => f.id !== id)); } }
+function deleteSel(){ if (ui.sel?.kind==='furn'){ const id = ui.sel.id; select(null); mutate(() => { state.furniture = state.furniture.filter(f => f.id !== id); }); } }
 function duplicateSel(){
   if (ui.sel?.kind !== 'furn') return;
   const f = getF(ui.sel.id), n = {...f, id:uid(), cx:f.cx+200, cy:f.cy+200};
-  ui.sel = {kind:'furn', id:n.id}; mutate(() => state.furniture.push(n));
+  mutate(() => state.furniture.push(n));
+  select({kind:'furn', id:n.id});
 }
 // 新放下的家具若压在墙 / 窗上，沿穿透较浅的方向推出来，刚好贴墙
 function pushOut(f){
@@ -403,12 +356,35 @@ function pushOut(f){
 function addItem(it, x, y){
   const [type,name,w,d,color] = it, f = F(type,name,Math.round(x/10)*10,Math.round(y/10)*10,w,d,0,color);
   pushOut(f);
-  ui.sel = {kind:'furn', id:f.id};
   mutate(() => type==='rug' ? state.furniture.unshift(f) : state.furniture.push(f));
+  select({kind:'furn', id:f.id});
   toast(tr(`已添加「${name}」${w}×${d}`, `Added "${nm(name)}" ${w}×${d}`));
 }
 function toggleWall(id){
-  const w = WALLS[+id.slice(1)];
+  // 可编辑户型：拆改 = 从 geometry 删除并重算房间
+  if (isEditablePlan()) {
+    const idx = (state.geometry?.wallIds || WALL_IDS).indexOf(id);
+    if (idx < 0) return;
+    const w = state.geometry.walls[idx];
+    mutate(() => {
+      if (!state.geometry) state.geometry = snapshotGeometry();
+      state.geometry.walls.splice(idx, 1);
+      state.geometry.wallIds.splice(idx, 1);
+      rebuildEditableGeometry(state);
+    });
+    toast(tr(`已删除墙体 ${Math.round(wallLengthMm(w))} mm · 房间已更新`, `Removed wall ${Math.round(wallLengthMm(w))} mm · rooms updated`));
+    return;
+  }
+  // 模板户型上的 extraWalls
+  if (String(id).startsWith('ew')) {
+    const w = (state.extraWalls || []).find(x => x.id === id);
+    if (!w) return;
+    mutate(() => { state.extraWalls = state.extraWalls.filter(x => x.id !== id); });
+    toast(tr(`已删除自建墙 ${Math.round(wallLengthMm(w))} mm`, `Removed custom wall ${Math.round(wallLengthMm(w))} mm`));
+    return;
+  }
+  const w = wallById(id);
+  if (!w) return;
   if (w[4]==='b') return toast(tr('承重墙（黑色）不可拆除', 'Load-bearing walls (black) cannot be removed'));
   if (w[4]==='e') return toast(tr('外墙属于建筑外围护结构，不建议拆除', 'Exterior walls are part of the building envelope and should not be removed'));
   const on = state.demolished.includes(id);
@@ -416,18 +392,104 @@ function toggleWall(id){
   toast(on ? tr('已恢复墙体', 'Wall restored') : tr(`已标记拆除 ${Math.max(w[2]-w[0], w[3]-w[1])} mm 墙体`, `Marked ${Math.max(w[2]-w[0], w[3]-w[1])} mm of wall for removal`));
 }
 
+function snapWallPoint(p, origin){
+  const q = snapPoint(p, false);
+  if (!origin) return q;
+  if (Math.abs(q.x - origin.x) >= Math.abs(q.y - origin.y)) return { x: q.x, y: origin.y };
+  return { x: origin.x, y: q.y };
+}
+
+function commitDrawnWall(a, b){
+  const rect = segmentToWallRect(a, b, WALL_THICK);
+  if (!rect) {
+    toast(tr('墙段太短（至少 200 mm）', 'Wall too short (min 200 mm)'));
+    return false;
+  }
+  if (isEditablePlan()) {
+    if (!WALLS.length) {
+      toast(tr('请先用「外框」画出外围墙', 'Draw an outer frame first'));
+      return false;
+    }
+    const id = 'ew' + uid().slice(1);
+    let roomCount = 0;
+    mutate(() => {
+      if (!state.geometry) state.geometry = snapshotGeometry();
+      state.geometry.walls.push([rect.x0, rect.y0, rect.x1, rect.y1, 'n']);
+      state.geometry.wallIds.push(id);
+      roomCount = rebuildEditableGeometry(state).roomCount;
+    });
+    toast(tr(`已添加隔墙 · 识别到 ${roomCount} 个房间`, `Partition added · ${roomCount} room(s) detected`));
+    return true;
+  }
+  const wall = { id: 'ew' + uid().slice(1), ...rect, kind: 'n' };
+  mutate(() => {
+    if (!state.extraWalls) state.extraWalls = [];
+    state.extraWalls.push(wall);
+  });
+  toast(tr(`已添加隔墙 ${Math.round(wallLengthMm(wall))} × ${WALL_THICK} mm`, `Added partition ${Math.round(wallLengthMm(wall))} × ${WALL_THICK} mm`));
+  return true;
+}
+
+function commitFrame(a, b){
+  const walls = outerFrameWalls(a.x, a.y, b.x, b.y, FRAME_THICK);
+  if (!walls) {
+    toast(tr(`外框至少 ${FRAME_MIN / 1000} m × ${FRAME_MIN / 1000} m`, `Frame must be at least ${FRAME_MIN / 1000} m × ${FRAME_MIN / 1000} m`));
+    return false;
+  }
+  if (WALLS.length && !confirm(tr(
+    '重新绘制外框将替换当前全部墙体与房间（可撤销）。继续？',
+    'Redrawing the frame replaces all walls and rooms (undoable). Continue?'
+  ))) return false;
+  let roomCount = 0;
+  mutate(() => {
+    state.geometry = snapshotGeometry();
+    state.geometry.walls = walls;
+    state.geometry.wallIds = walls.map((_, i) => 'fw' + i);
+    state.geometry.windows = [];
+    state.geometry.doors = [];
+    state.geometry.slides = [];
+    state.geometry.lintels = [];
+    state.geometry.entryMark = null;
+    state.demolished = [];
+    state.extraWalls = [];
+    roomCount = rebuildEditableGeometry(state).roomCount;
+  });
+  fitView();
+  renderOpenings();
+  renderDims();
+  toast(tr(`已创建外框（墙厚 ${FRAME_THICK} mm）· ${roomCount} 个房间`, `Frame created (${FRAME_THICK} mm walls) · ${roomCount} room(s)`));
+  return true;
+}
+
+function syncEditableUi(){
+  const ed = isEditablePlan();
+  document.querySelectorAll('[data-editable-only]').forEach(el => { el.hidden = !ed; });
+  if (!ed && (ui.tool === 'frame')) setTool('select');
+}
+
 function setTool(t){
+  if (t === 'frame' && !isEditablePlan()) {
+    toast(tr('请先在「户型」菜单切换到「空白户型」', 'Switch to Blank plan in the Plan menu first'));
+    return;
+  }
   ui.tool = t; ui.mA = null; ui.mCur = null;
   svg.setAttribute('class', 'tool-' + t);
   document.querySelectorAll('#tools .btn').forEach(b => b.classList.toggle('on', b.dataset.tool === t));
   syncModeHint();
   renderMeasure();
+  renderWalls();
 }
 function syncModeHint(){
   const hints = {select:'',
     measure:COARSE ? tr('按住拖出测量线，或依次点两点 · 靠近墙面自动吸附 · 点「选择」退出', 'Hold and drag a line, or tap two points · snaps to walls · tap "Select" to exit')
       : tr('点击两点（或按住拖动）测量距离 · 靠近墙面自动吸附 · Shift 锁定水平/垂直 · Esc 取消', 'Click two points (or drag) to measure · snaps to walls · Shift locks horizontal/vertical · Esc cancels'),
-    demolish:tr('点击灰色非承重墙标记拆除，再次点击恢复 · 黑色承重墙不可拆', 'Click a grey non-bearing wall to remove it, click again to restore · black bearing walls cannot be removed')};
+    frame:tr('拖出矩形作为外墙（厚 240mm，至少 3m×3m）· 完成后可用「画墙」加隔墙自动分间', 'Drag a rectangle for exterior walls (240mm, min 3×3m) · then use Wall to split rooms'),
+    wall:isEditablePlan()
+      ? tr('点击两点画隔墙 · 自动水平/垂直 · 厚 120mm · 松手后自动识别房间', 'Click two points for a partition · H/V · 120mm · rooms update automatically')
+      : tr('点击两点（或拖动）画轴对齐隔墙 · 自动吸附墙角 · 厚度 120mm · Esc 取消 · 「拆改」可删自建墙', 'Click two points (or drag) for an axis-aligned partition · snaps to walls · 120mm thick · Esc cancels · Demolish deletes custom walls'),
+    demolish:isEditablePlan()
+      ? tr('点击任意墙体删除，并重新识别房间', 'Click any wall to delete it and rebuild rooms')
+      : tr('点击灰色非承重墙标记拆除，再次点击恢复 · 绿色自建墙点击即删 · 黑色承重墙不可拆', 'Click grey non-bearing walls to remove/restore · green custom walls delete on click · black bearing walls stay')};
   const h = $('#modehint'); h.textContent = hints[ui.tool]; h.classList.toggle('show', !!hints[ui.tool]);
 }
 
@@ -504,6 +566,22 @@ function endDrag(cancel){
     }
     renderMeasure(); return;                   // 没拖动：保留起点，等第二次点击
   }
+  if (d.kind === 'wall'){
+    if (cancel){ ui.mA = ui.mCur = null; renderWalls(); return; }
+    if (d.moved && ui.mA && ui.mCur){
+      const a = ui.mA, b = ui.mCur; ui.mA = ui.mCur = null;
+      commitDrawnWall(a, b);
+    }
+    renderWalls(); return;
+  }
+  if (d.kind === 'frame'){
+    if (cancel){ ui.mA = ui.mCur = null; renderWalls(); return; }
+    if (d.moved && ui.mA && ui.mCur){
+      const a = ui.mA, b = ui.mCur; ui.mA = ui.mCur = null;
+      commitFrame(a, b);
+    }
+    renderWalls(); return;
+  }
   if (d.kind === 'pan'){
     if (!cancel && !d.moved && ui.tool === 'select') select(d.room ? {kind:'room', id:d.room} : null);
     return;
@@ -513,25 +591,14 @@ function endDrag(cancel){
 
 
 
-/* ======================= 家具库 ======================= */
-function buildLib(){
-  $('#lib').innerHTML = LIB.map((c,ci) => `<h4>${nm(c.cat)}</h4><div class="lib-grid">${c.items.map((it,ii) => {
-    const [t,n,w,d,col] = it, pad = Math.max(w,d)*.08;
-    return `<div class="item" data-key="${ci}:${ii}" title="${tr('点击添加，或拖到平面图中的指定位置', 'Click to add, or drag onto the plan')}">
-      <svg viewBox="${-w/2-pad} ${-d/2-pad} ${w+2*pad} ${d+2*pad}">${furnSVG(t,w,d,col)}</svg><b>${esc(nm(n))}</b><small>${w}×${d}</small></div>`;
-  }).join('')}</div>`).join('') + `<div class="hint">${tr(
-    `家具按真实尺寸（mm）绘制。${COARSE ? '点一下放到画面中央，或按住向右拖到平面图 / 3D 地面上的指定位置（上下滑动为滚动列表）。' : '点击添加到画面中央，或直接拖到平面图 / 3D 地面上。'}添加后可在右侧修改宽深与颜色。`,
-    `Furniture is drawn at real size (mm). ${COARSE ? 'Tap to place at the center, or hold and drag right onto the plan / 3D floor (swipe up/down to scroll).' : 'Click to add at the center, or drag onto the plan / 3D floor.'} Edit size and color in the right panel afterwards.`)}</div>`;
-  document.querySelectorAll('.item').forEach(el => el.addEventListener('pointerdown', e => {
-    if (e.button) return;
-    libDrag = {el, id:e.pointerId, sx:e.clientX, sy:e.clientY, it:itemOf(el), ghost:null};
-  }));
-}
-const itemOf = el => { const [ci, ii] = el.dataset.key.split(':').map(Number); return LIB[ci].items[ii]; };
-
-// 家具库拖放：用 pointer 事件实现（iPad 上 HTML5 拖放不可靠）。
-// 列表设置了 touch-action:pan-y，竖向滑动交给浏览器滚动（会触发 pointercancel），横向拖动才开始拖放。
+/* ======================= 家具库拖放（列表由 FurnitureLibrary.vue 渲染） ======================= */
 let libDrag = null;
+/** @param {any[]} it LIB item tuple @param {PointerEvent} e */
+function beginLibDrag(it, e) {
+  if (e.button) return;
+  const el = e.currentTarget || e.target?.closest?.('.item');
+  libDrag = { el, id: e.pointerId, sx: e.clientX, sy: e.clientY, it, ghost: null };
+}
 // 屏幕坐标 → 户型坐标（mm）。2D 取平面图坐标，3D 取射线与地面的交点；s = 该处每 mm 的屏幕像素数
 function dropPoint(x, y){
   const r = $('#stage').getBoundingClientRect();
@@ -564,10 +631,7 @@ function exportPNG(){
 }
 
 /* ======================= 杂项 ======================= */
-let toastT;
-function toast(msg){ const t = $('#toast'); t.textContent = msg; t.classList.add('show'); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('show'), 1800); }
-
-
+/* toast 由 store/design.js 提供，Toast.vue 渲染 */
 
 /* 全屏：标准 API + Safari（iPad）的 webkit 前缀版本 */
 const fsEl = () => document.fullscreenElement || document.webkitFullscreenElement;
@@ -610,7 +674,8 @@ async function setView(m){
 function setLang(l){
   setLANG(l); try { localStorage.setItem(LANG_KEY, l); } catch(e) {}
   applyStaticLang(); syncFullscreen(); syncModeHint(); syncPaneBtns();
-  buildLib(); renderOpenings(); renderAll();
+  buildPlanMenu(); syncBrand();
+  renderOpenings(); renderAll();
   $('#tip').textContent = TIPS()[viewMode];
   bridge.View3D?.relang();
 }
@@ -619,12 +684,12 @@ function setLang(l){
 function bindAll() {
 svg.addEventListener('pointerdown', e => {
   if (e.button === 1 || e.button === 2) return;
-  closeDrawers(); $('details.menu').open = false;
+  closeDrawers(); document.querySelectorAll('details.menu').forEach(m => { m.open = false; });
   if (e.pointerType !== 'mouse'){
     touches.set(e.pointerId, {x:e.clientX, y:e.clientY});
     svg.setPointerCapture(e.pointerId);
     if (touches.size >= 2){                    // 第二根手指落下：取消单指操作，进入双指缩放 / 平移
-      endDrag(drag?.kind === 'measure' || drag?.kind === 'pan');
+      endDrag(drag?.kind === 'measure' || drag?.kind === 'wall' || drag?.kind === 'frame' || drag?.kind === 'pan');
       const {d, c} = pinchInfo();
       pinch = {d, c, s:view.s, px:view.x0 + c[0]/view.s, py:view.y0 + c[1]/view.s};
       return;
@@ -637,6 +702,18 @@ svg.addEventListener('pointerdown', e => {
     if (!ui.mA){ ui.mA = q; ui.mCur = q; drag = {kind:'measure', sx:e.clientX, sy:e.clientY, moved:false}; svg.setPointerCapture(e.pointerId); }
     else { const a = ui.mA; ui.mA = null; ui.mCur = null; if (Math.hypot(q.x-a.x, q.y-a.y) > 20) mutate(() => state.measures.push({a, b:q})); }
     renderMeasure(); return;
+  }
+  if (ui.tool === 'wall'){
+    const q = snapWallPoint(p, ui.mA);
+    if (!ui.mA){ ui.mA = q; ui.mCur = q; drag = {kind:'wall', sx:e.clientX, sy:e.clientY, moved:false}; svg.setPointerCapture(e.pointerId); }
+    else { const a = ui.mA; ui.mA = null; ui.mCur = null; commitDrawnWall(a, q); }
+    renderWalls(); return;
+  }
+  if (ui.tool === 'frame'){
+    const q = snapPoint(p, false);
+    if (!ui.mA){ ui.mA = q; ui.mCur = q; drag = {kind:'frame', sx:e.clientX, sy:e.clientY, moved:false}; svg.setPointerCapture(e.pointerId); }
+    else { const a = ui.mA; ui.mA = null; ui.mCur = null; commitFrame(a, q); }
+    renderWalls(); return;
   }
   const h = t.closest('[data-handle]');
   if (h && ui.sel?.kind === 'furn'){
@@ -666,14 +743,24 @@ svg.addEventListener('pointermove', e => {
   $('#cx').textContent = Math.round(p.x) + ' mm'; $('#cy').textContent = Math.round(p.y) + ' mm';
   if (!drag){
     const room = e.target.closest && e.target.closest('[data-room]');
-    $('#hover').innerHTML = room ? `<b>${esc(state.rooms[room.dataset.room].name)}</b> ${fmt(area(ROOMS.find(r=>r.id===room.dataset.room).poly))} m²` : '';
+    $('#hover').innerHTML = room ? `<b>${esc(state.rooms[room.dataset.room]?.name || ROOMS.find(r=>r.id===room.dataset.room)?.name || '')}</b> ${fmt(area(ROOMS.find(r=>r.id===room.dataset.room).poly))} m²` : '';
     if (ui.tool === 'measure' && ui.mA){ ui.mCur = snapPoint(p, e.shiftKey); renderMeasure(); }
+    if (ui.tool === 'wall' && ui.mA){ ui.mCur = snapWallPoint(p, ui.mA); renderWalls(); }
+    if (ui.tool === 'frame' && ui.mA){ ui.mCur = snapPoint(p, false); renderWalls(); }
     return;
   }
   const far = Math.hypot(e.clientX-drag.sx, e.clientY-drag.sy) >= TAP;
   if (drag.kind === 'measure'){
     if (far) drag.moved = true;
     ui.mCur = snapPoint(p, e.shiftKey); renderMeasure(); return;
+  }
+  if (drag.kind === 'wall'){
+    if (far) drag.moved = true;
+    ui.mCur = snapWallPoint(p, ui.mA); renderWalls(); return;
+  }
+  if (drag.kind === 'frame'){
+    if (far) drag.moved = true;
+    ui.mCur = snapPoint(p, false); renderWalls(); return;
   }
   if (drag.kind === 'pan'){
     if (!drag.moved && !far) return;
@@ -715,7 +802,10 @@ svg.addEventListener('wheel', e => {
   zoomAt(view.s*Math.exp(-e.deltaY*(e.ctrlKey ? .01 : .0015)), e.clientX-r.left, e.clientY-r.top);
 }, {passive:false});
 svg.addEventListener('dblclick', e => { if (ui.tool==='select' && e.target.closest('[data-fid]')) rotateSel(90); });
-svg.addEventListener('contextmenu', e => { if (ui.tool==='measure'){ e.preventDefault(); ui.mA = null; renderMeasure(); } });
+svg.addEventListener('contextmenu', e => {
+  if (ui.tool === 'measure'){ e.preventDefault(); ui.mA = ui.mCur = null; renderMeasure(); }
+  if (ui.tool === 'wall' || ui.tool === 'frame'){ e.preventDefault(); ui.mA = ui.mCur = null; renderWalls(); }
+});
 
 
 /* ======================= 键盘 ======================= */
@@ -730,14 +820,19 @@ document.addEventListener('keydown', e => {
   if (k === '[' || k === ']'){ drawer(k === '[' ? 'lib' : 'panel'); return; }
   if (k === 'f' && e.shiftKey){ toggleFullscreen(); return; }
   if (k === 't') setView(is3D() ? '2d' : '3d');
-  else if (is3D() && ['v','m','x','f','+','=','-'].includes(k)) return;
+  else if (is3D() && ['v','m','w','b','x','f','+','=','-'].includes(k)) return;
   else if (k === 'v') setTool('select');
   else if (k === 'm') setTool('measure');
+  else if (k === 'w') setTool('wall');
+  else if (k === 'b') setTool('frame');
   else if (k === 'x') setTool('demolish');
   else if (k === 'f') fitView();
   else if (k === 'r') rotateSel(e.shiftKey ? -90 : 90);
   else if (k === 'delete' || k === 'backspace'){ e.preventDefault(); deleteSel(); }
-  else if (k === 'escape'){ if (ui.mA){ ui.mA = null; renderMeasure(); } else { if (ui.tool !== 'select') setTool('select'); select(null); } }
+  else if (k === 'escape'){
+    if (ui.mA){ ui.mA = ui.mCur = null; renderMeasure(); renderWalls(); }
+    else { if (ui.tool !== 'select') setTool('select'); select(null); }
+  }
   else if (k.startsWith('arrow') && ui.sel?.kind === 'furn'){
     e.preventDefault(); const st = e.shiftKey ? 100 : 10;
     mutate(() => { const f = getF(ui.sel.id); if (k==='arrowleft') f.cx -= st; if (k==='arrowright') f.cx += st; if (k==='arrowup') f.cy -= st; if (k==='arrowdown') f.cy += st; });
@@ -754,7 +849,7 @@ addEventListener('pointermove', e => {
     if (Math.hypot(e.clientX-libDrag.sx, e.clientY-libDrag.sy) < TAP) return;
     const g = libDrag.ghost = document.createElement('div'); g.id = 'ghost';
     g.innerHTML = `<svg viewBox="${-it[2]/2} ${-it[3]/2} ${it[2]} ${it[3]}">${furnSVG(it[0],it[2],it[3],it[4])}</svg>`;
-    document.body.appendChild(g); libDrag.el.classList.add('dragging');
+    document.body.appendChild(g); libDrag.el?.classList?.add('dragging');
   }
   // 幽灵图按落点处的比例显示真实大小（3D 中近大远小）
   const g = libDrag.ghost, s = Math.max(dropPoint(e.clientX, e.clientY)?.s || (is3D() ? .05 : view.s), .02);
@@ -765,7 +860,7 @@ addEventListener('pointermove', e => {
 function endLibDrag(e, ok){
   if (!libDrag || e.pointerId !== libDrag.id) return;
   const d = libDrag; libDrag = null;
-  d.el.classList.remove('dragging');
+  d.el?.classList?.remove('dragging');
   if (d.ghost){
     d.ghost.remove();
     if (!ok) return;
@@ -811,22 +906,51 @@ $('#fullscreen').onclick = toggleFullscreen;
 if (navigator.standalone || matchMedia('(display-mode: standalone)').matches) $('#fullscreen').hidden = true;
 $('#tgLib').onclick = () => drawer('lib');
 $('#tgPanel').onclick = () => drawer('panel');
-// 触屏上点菜单以外的地方收起「文件」菜单
-document.addEventListener('pointerdown', e => { const m = $('details.menu'); if (m.open && !m.contains(e.target)) m.open = false; });
+// 触屏上点菜单以外的地方收起下拉菜单
+document.addEventListener('pointerdown', e => {
+  document.querySelectorAll('details.menu').forEach(m => { if (m.open && !m.contains(e.target)) m.open = false; });
+});
 matchMedia('(max-width:1100px)').addEventListener('change', () => drawer(null));
 drawer(null);                                  // 恢复上次的面板收起状态
+buildPlanMenu();
 $('#exportPng').onclick = exportPNG;
-$('#exportJson').onclick = () => download(tr('户型装修方案', 'floor-plan-design') + '.json', new Blob([JSON.stringify(state, null, 2)], {type:'application/json'}));
+$('#exportJson').onclick = () => {
+  const payload = { ...state, version: 2, planId: getActivePlanId() };
+  download(tr('户型装修方案', 'floor-plan-design') + '.json', new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' }));
+};
 $('#importJson').onclick = () => $('#fileIn').click();
 $('#fileIn').onchange = e => {
   const file = e.target.files[0]; if (!file) return;
   file.text().then(txt => {
-    try { const s = JSON.parse(txt); if (!Array.isArray(s.furniture)) throw 0; const b = snap(); replaceState(fixState(s)); ui.sel = null; commit(b); toast(tr('方案已导入', 'Plan imported')); }
-    catch(err){ toast(tr('文件格式不正确', 'Invalid file format')); }
+    try {
+      const s = JSON.parse(txt);
+      if (!Array.isArray(s.furniture)) throw 0;
+      const targetId = s.planId && hasPlan(s.planId) ? s.planId : getActivePlanId();
+      if (targetId !== getActivePlanId()) {
+        save();
+        switchPlanId(targetId);
+        bootstrapState(fixState(s));
+        afterPlanChange();
+        toast(tr('方案已导入（已切换户型）', 'Plan imported (floor plan switched)'));
+      } else {
+        const b = snap();
+        replaceState(fixState(s));
+        ui.sel = null;
+        commit(b);
+        toast(tr('方案已导入', 'Plan imported'));
+      }
+    } catch (err) { toast(tr('文件格式不正确', 'Invalid file format')); }
   });
   e.target.value = '';
 };
-$('#reset').onclick = () => { if (confirm(tr('恢复为默认设计方案？（可撤销）', 'Reset to the default design? (undoable)'))){ const b = snap(); replaceState(defaultState()); ui.sel = null; commit(b); } };
+$('#reset').onclick = () => {
+  if (confirm(tr('恢复为默认设计方案？（可撤销）', 'Reset to the default design? (undoable)'))) {
+    const b = snap();
+    replaceState(defaultState());
+    ui.sel = null;
+    commit(b);
+  }
+};
 // 横竖屏切换、表头换行等都会改变画布尺寸；尺寸从 0 恢复（如首次布局）时重新适应窗口
 // 其余尺寸变化（收起 / 展开面板等）保持画面中心不动
 let lastW = 0, lastH = 0;
@@ -841,7 +965,7 @@ new ResizeObserver(() => {
 $('#langSel').onclick = e => { const l = e.target.closest('[data-lang]')?.dataset.lang; if (l && l !== LANG) setLang(l); };
 
 applyStaticLang(); syncFullscreen();
-buildDefs(); buildLib(); renderOpenings(); renderDims();
+buildDefs(); renderOpenings(); renderDims();
 $('#tip').textContent = TIPS()['2d'];
 fitView(); renderAll();
 
@@ -852,11 +976,12 @@ fitView(); renderAll();
 export function initPlan2D() {
   svg = $('#plan');
   bindAll();
-  setStoreHooks({ renderAll, toast });
+  setStoreHooks({ renderCanvas: renderAll });
+  setSelectHook(() => renderSel());
   applyStaticLang();
   syncFullscreen();
+  syncEditableUi();
   buildDefs();
-  buildLib();
   renderOpenings();
   renderDims();
   $('#tip').textContent = TIPS()['2d'];
@@ -866,8 +991,9 @@ export function initPlan2D() {
   bridge.closeDrawers = closeDrawers;
   bridge.api = {
     state, ui, view, getF, snap, commit, mutate, save, snapMove,
-    renderAll, select, closeDrawers, aabb, COARSE, TAP, tr, nm,
+    renderAll, select, closeDrawers, drawer, aabb, COARSE, TAP, tr, nm,
     ROOMS, WALLS, WINS, DOORS, SLIDES, MATS, $,
+    rotateSel, deleteSel, duplicateSel, clearLayout, beginLibDrag,
   };
   window.select = select;
   window.closeDrawers = closeDrawers;

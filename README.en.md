@@ -14,6 +14,8 @@ The main app is a progressive **Vue 3 + Vite** split. The original single-file b
 - Move, rotate (hold Shift for free angle), and resize items, with automatic snapping to walls
 - Measuring tool (snaps to nearby walls; hold Shift to lock horizontal / vertical)
 - Remove or modify non-load-bearing walls; load-bearing walls are marked separately
+- Simple wall drawing: axis-aligned 120mm partitions with snap; delete custom walls via Demolish
+- **DIY floor plan (phase 1)**: Plan menu → Blank plan → Frame tool → Wall tool; rooms are detected automatically
 - Layer toggles: dimensions, room names, furniture, grid, load-bearing walls
 
 **3D Scene**
@@ -24,11 +26,12 @@ The main app is a progressive **Vue 3 + Vite** split. The original single-file b
 - Select and drag furniture in 3D as well, kept in sync with the 2D plan in real time
 
 **Plans & Statistics**
+- Switch between floor-plan templates via the **Plan** menu (each plan’s layout is saved separately in local storage)
 - Automatic calculation of room areas and net usable floor area
 - Change the floor material of each room (wood, tiles, marble, terrazzo, carpet, etc.), with cost estimates based on area plus 5% wastage
 - Undo / redo; plans are auto-saved in the browser's local storage
 - Chinese / English UI toggle (button on the right of the top bar; defaults to Chinese and remembers your choice)
-- Export to PNG, export / import plans as JSON
+- Export to PNG, export / import plans as JSON (includes `planId`; import can switch templates)
 
 ## Quick Start (Vue)
 
@@ -55,7 +58,7 @@ Open `legacy-index.html` in a browser, or serve the folder statically. The Vue b
 | Key | Action |
 | --- | --- |
 | `T` | Toggle 2D / 3D |
-| `V` / `M` / `X` | Select / Measure / Modify walls |
+| `V` / `M` / `B` / `W` / `X` | Select / Measure / Frame / Draw wall / Modify walls |
 | `R` / `Shift+R` | Rotate selected furniture 90° clockwise / counterclockwise |
 | `Delete` / `Backspace` | Delete selected furniture |
 | `Ctrl/⌘ + D` | Duplicate selected furniture |
@@ -72,11 +75,15 @@ Open `legacy-index.html` in a browser, or serve the folder statically. The Vue b
 - Vue 3 (Composition API) + Vite
 - 2D plan: SVG (`src/engine/plan2d.js`)
 - 3D: [Three.js](https://threejs.org/) r160 (`src/engine/view3d.js`)
-- Plans in `localStorage` (`huxing-design-v1`, shared with legacy)
+- Plans in `localStorage` under `huxing-design-v2:<planId>` (legacy `huxing-design-v1` is migrated into the default 3BR on first load)
 
-## Customizing the Floor Plan
+## Customizing / Adding Floor Plans
 
-Floor plan data lives in [`src/data/floorplan.js`](src/data/floorplan.js) (`ROOMS`, `WALLS`, `WINS`, `MATS`, `LIB`). 3D furniture models are in `src/engine/furniture3d.js` (`buildFurniture`).
+1. Add a module under [`src/data/plans/`](src/data/plans/) (see `three-bed.js`, `compact-2br.js`)
+2. Register it in [`src/data/plans/index.js`](src/data/plans/index.js) (`PLANS`)
+3. Key fields: geometry (`walls`, `windows`, `doors`, `slides`, `rooms`), `center` / `bounds` / `walkStart`, optional `dimChains` / `entryMark` / `lintels`, and default `furniture`
+
+Shared materials and the furniture library live in [`src/data/shared.js`](src/data/shared.js). 3D furniture models: `src/engine/furniture3d.js` (`buildFurniture`).
 
 ## Social Media
 

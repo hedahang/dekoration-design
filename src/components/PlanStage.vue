@@ -1,3 +1,7 @@
+<script setup>
+import FabBar from './FabBar.vue';
+</script>
+
 <template>
   <main id="stage">
     <svg id="plan" class="tool-select" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
@@ -24,6 +28,6 @@
     </div>
     <div class="scalebar" id="scalebar"><span id="sbText">1 m</span><div class="bar" id="sbBar"></div></div>
     <div class="modehint" id="modehint"></div>
-    <div id="fab"></div>
+    <FabBar />
   </main>
 </template>

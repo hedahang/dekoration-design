@@ -13,9 +13,12 @@ button,input,select{font:inherit;color:inherit}
 input{-webkit-user-select:text;user-select:text}
 header{grid-column:1/-1;display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px;padding:8px 14px;
   background:var(--panel);border-bottom:1px solid var(--line)}
-.brand{display:flex;flex-direction:column;margin-right:8px;line-height:1.25}
+.brand{display:flex;flex-direction:column;margin-right:8px;line-height:1.25;min-width:0}
 .brand b{font-size:15px;letter-spacing:.5px}
 .brand span{color:var(--muted);font-size:12px}
+#planMenu .menu-pop{min-width:160px}
+#planList .btn{display:block;width:100%;text-align:left;border-radius:6px}
+#planList .btn.on{background:var(--accent-soft);color:var(--accent)}
 .grp{display:flex;align-items:center;gap:2px;padding:2px;border:1px solid var(--line);border-radius:8px;background:#fff}
 .btn{border:0;background:transparent;padding:5px 9px;border-radius:6px;cursor:pointer;white-space:nowrap}
 .btn:hover{background:#f2ece2}
@@ -44,10 +47,12 @@ aside.right{border-right:0;border-left:1px solid var(--line)}
 main{position:relative;overflow:hidden;background:var(--paper)}
 #plan{width:100%;height:100%;display:block;touch-action:none;cursor:default}
 #plan.panning{cursor:grabbing}
-#plan.tool-measure{cursor:crosshair}
+#plan.tool-measure,#plan.tool-wall,#plan.tool-frame{cursor:crosshair}
 #plan .wall{pointer-events:none}
 #plan.tool-demolish .wall{pointer-events:all;cursor:pointer}
 #plan.tool-demolish .wall:hover{fill:#d9894f}
+#plan.tool-demolish .wall.extra:hover{fill:#c45b4a}
+#plan .wall.extra{fill:#7d8f7a}
 #plan.tool-select .room:hover{opacity:.82}
 #plan .furn{cursor:move}
 @media (hover:hover){#plan .furn:hover{filter:drop-shadow(0 0 2px rgba(181,101,58,.7))}}
@@ -91,7 +96,7 @@ tr.click:hover td{background:#faf5ee}
 .kbd{display:grid;grid-template-columns:auto 1fr;gap:3px 10px;font-size:12px;color:var(--muted)}
 kbd{font:11px ui-monospace,Menlo,monospace;background:#f2ece2;border:1px solid var(--line);border-bottom-width:2px;border-radius:4px;padding:0 5px;color:var(--ink)}
 .big{font-size:22px;font-weight:600;font-variant-numeric:tabular-nums}
-.stats{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:6px}
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(90px,1fr));gap:8px;margin-bottom:6px}
 .stats div{background:#faf6ef;border-radius:8px;padding:8px}
 .stats small{display:block;color:var(--muted);font-size:11px}
 #toast{position:fixed;left:50%;bottom:110px;transform:translateX(-50%) translateY(20px);background:var(--ink);color:#fff;

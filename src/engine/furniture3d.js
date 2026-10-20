@@ -3,10 +3,12 @@ import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.j
 
 export const M = v => v / 1000;
 
-let mat, rng;
+let mat, rng, glassMat, frameMat;
 export function setMatApi(api) {
   mat = api.mat;
   rng = api.rng;
+  glassMat = api.glassMat;
+  frameMat = api.frameMat;
 }
 
 /* ======================= 几何小工具（y = 底面高度） ======================= */
@@ -588,9 +590,7 @@ export function buildFurniture(f){
     }
     default: g.add(box(w, .8, d, c));
   }
-  g.position.set(wx(f.cx), 0, wz(f.cy));
-  g.rotation.y = -f.rot * Math.PI/180;       // 平面顺时针旋转 → 绕 Y 轴负向
-  g.userData.fid = f.id;
+  // 世界坐标由 view3d.buildFurn 设置（依赖户型原点 OX/OY）
   return g;
 }
 
